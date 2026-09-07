@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AirPad — graj na dużym ekranie, telefon jako pad</title>
+<meta name="description" content="AirPad: darmowa konsola w przeglądarce. Telefon = kontroler. Gry 3D multiplayer, bez pobierania, bez limitów.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>">
+<link rel="preconnect" href="https://unpkg.com">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<!-- ============ LANDING ============ -->
+<div id="landing">
+  <div class="wrap">
+    <div class="topbar">
+      <div class="logo"><div class="dot">🎮</div> AirPad</div>
+      <div class="badge">100% za darmo • bez limitów • bez konta</div>
+    </div>
+
+    <div class="hero">
+      <h1>Twój telefon to <span>kontroler</span>.<br>Twój ekran to konsola.</h1>
+      <p>Otwórz AirPad na komputerze lub TV, zeskanuj kod QR telefonem i graj w gry 3D ze znajomymi. Zero instalacji, zero opłat, zero limitów czasu.</p>
+      <div class="cta">
+        <button class="btn primary big" id="startBtn">▶ Uruchom konsolę</button>
+        <a class="btn big" href="pad.html">📱 Mam kod — podłącz pada</a>
+      </div>
+    </div>
+
+    <div class="feats">
+      <div class="feat"><div class="ic">⚡</div><h3>Bez pobierania</h3><p>Wszystko działa w przeglądarce — na PC, Macu, Smart TV i telefonie.</p></div>
+      <div class="feat"><div class="ic">🔗</div><h3>Połączenie P2P</h3><p>Telefon łączy się bezpośrednio z ekranem przez WebRTC. Minimalne opóźnienie.</p></div>
+      <div class="feat"><div class="ic">👥</div><h3>Do 8 graczy</h3><p>Każdy dołącza swoim telefonem tym samym 4-cyfrowym kodem.</p></div>
+      <div class="feat"><div class="ic">🆓</div><h3>Zero płatności</h3><p>Wszystkie gry i wszystkie tryby odblokowane na zawsze. Bez „Hero”, bez reklam.</p></div>
+    </div>
+
+    <h2 class="sec">🎲 Biblioteka gier</h2>
+    <div class="grid" id="gameGrid"></div>
+
+    <footer>AirPad — otwarta, darmowa alternatywa dla konsol w przeglądarce. Zbudowane na Three.js + WebRTC.</footer>
+  </div>
+</div>
+
+<!-- ============ STAGE (3D) ============ -->
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="ui"></div>
+
+<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
