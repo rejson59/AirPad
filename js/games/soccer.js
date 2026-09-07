@@ -1,9 +1,11 @@
 import { THREE, avatar, nameSprite, clamp } from '../engine.js';
+import { makeSparks, shake } from '../fx.js';
+import * as SFX from '../audio.js';
 
 export const meta = {
   id: 'soccer',
   title: 'Rocket Soccer',
-  tagline: 'Piłka nożna autami 3D — 2 drużyny, 5 goli wygrywa',
+  tagline: 'Stadion 3D — auta, boost, strzał i 5 goli do zwycięstwa',
   color: '#ff9a1f',
   tag: 'DRUŻYNY',
   min: 2, max: 8,
@@ -21,6 +23,13 @@ export function start(ctx) {
   const world = new THREE.Group(); scene.add(world);
   scene.background = new THREE.Color(0x06120a);
   scene.fog = new THREE.Fog(0x06120a, 90, 260);
+  const sparks = makeSparks(world, 160);
+  // floodlights
+  for (const [x, z] of [[-W, -L], [W, -L], [-W, L], [W, L]]) {
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.5, 22, 6), new THREE.MeshStandardMaterial({ color: 0x222 }));
+    pole.position.set(x * 1.08, 11, z * 1.08); world.add(pole);
+    const pl = new THREE.PointLight(0xfff0d0, 1.2, 90); pl.position.set(x, 20, z); world.add(pl);
+  }
 
   // pitch
   const pitch = new THREE.Mesh(new THREE.PlaneGeometry(W * 2, L * 2),
@@ -126,7 +135,7 @@ export function start(ctx) {
           const n = flat.normalize();
           const power = 14 + Math.abs(s.vel) * .9 + (inp.btn.a ? 26 : 0);
           bv.addScaledVector(n, power * dt * 22);
-          if (inp.btn.a) { bvy += 9; net.send(p, { t: 'rumble', ms: 45 }); }
+          if (inp.btn.a) { bvy += 9; net.send(p, { t: 'rumble', ms: 45 }); sparks.burst(ball.position.x, by, ball.position.z, 0xffffff, 10, 10); SFX.hit(); }
           ball.position.copy(s.g.position).addScaledVector(n, 3.7).setY(by);
         }
         net.send(p, { t: 'hud', boost: s.boost, score: `${score[0]}:${score[1]}`, team: s.team === 0 ? '🔵' : '🟠', speed: Math.round(Math.abs(s.vel) * 3.6) });
@@ -147,6 +156,8 @@ export function start(ctx) {
           msg = `⚽ GOOOL dla ${scorer === 0 ? '🔵 Niebieskich' : '🟠 Pomarańczowych'}!`;
           ctx.toast(msg);
           net.broadcast({ t: 'rumble', ms: 200 });
+          sparks.burst(ball.position.x, 4, ball.position.z, scorer === 0 ? 0x3aa0ff : 0xff6a2a, 40, 22);
+          SFX.goal(); shake(camera, 1.2);
           celebrate = 3;
           if (score[scorer] >= GOALS_TO_WIN && !over) {
             over = true;
@@ -159,10 +170,10 @@ export function start(ctx) {
         } else { ball.position.z = Math.sign(ball.position.z) * (L - 2.2); bv.z *= -.7; }
       }
 
-      // camera: broadcast style behind the ball
+      sparks.update(dt);
       const camZ = clamp(ball.position.z * .55, -L * .5, L * .5);
-      camera.position.lerp(new THREE.Vector3(ball.position.x * .25, 52, camZ - 68), .05);
-      camera.lookAt(ball.position.x * .3, 2, ball.position.z * .4);
+      camera.position.lerp(new THREE.Vector3(ball.position.x * .22, 42, camZ - 58), .07);
+      camera.lookAt(ball.position.x * .35, 2, ball.position.z * .45);
 
       hud(`<div style="font-size:26px;font-weight:900;letter-spacing:1px">
             <span style="color:${TEAM_COL[0]}">${score[0]}</span> : <span style="color:${TEAM_COL[1]}">${score[1]}</span></div>

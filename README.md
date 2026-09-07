@@ -13,7 +13,7 @@ Alternatywa dla AirConsole: **bez płatności, bez limitów czasu, bez konta, be
 ## Biblioteka gier (13, wszystkie 3D / Three.js)
 | Gra | Opis | Gracze |
 |---|---|---|
-| 🏎️ Turbo Kart | Wyścig na 3 okrążenia, drift i boost | 1–8 |
+| 🏎️ Turbo Kart | Nocny tor, drift, boost pady, skrzynki (turbo / olej / rakieta) | 1–8 |
 | ⚽ Rocket Soccer | Piłka nożna autami, 2 drużyny, do 5 goli | 2–8 |
 | 🗼 Tower Climb | Platformówka — wyścig na szczyt wieży, podwójny skok i dash | 1–8 |
 | 💣 Bomb Blitz | Labirynt, bomby, skrzynki i power-upy, 5 rund | 2–8 |
@@ -38,9 +38,11 @@ Alternatywa dla AirConsole: **bez płatności, bez limitów czasu, bez konta, be
 - Motyw wizualny: **czerń + gradient pomarańcz–żółć**, skeuomorficzne panele, wciskane przyciski i fizyczny analog.
 
 ## Technologia
-- **Three.js** (ES modules z CDN) — grafika 3D
-- **PeerJS / WebRTC** — bezpośrednie połączenie telefon ↔ ekran, bez własnego serwera
+- **Three.js** r160 (lokalnie w `vendor/`) — grafika 3D
+- **WebRTC** dwoma ścieżkami naraz: natywne DataChannel + sygnalizacja ntfy.sh **oraz** PeerJS (0.peerjs.com) z TURN `*.turn.peerjs.com`
 - Czysty, statyczny HTML/CSS/JS — **brak kroku budowania**
+
+> Telefon **nie musi** być w tej samej sieci Wi‑Fi co konsola. Jeśli kiedyś widziałeś „Brak odpowiedzi — sprawdź kod”, to stary build nadpisywał działający TURN martwym OpenRelay.
 
 ## Hosting
 - **GitHub Pages**: Settings → Pages → Deploy from branch → `/ (root)` (jest już `.nojekyll`).

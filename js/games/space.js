@@ -123,6 +123,7 @@ export function start(ctx) {
               s.dead = 2;
               const k = ps.get(b.owner);
               if (k) { k.kills++; if (k.kills >= GOAL && !over) { over = true; ctx.finish(rank()); } }
+              SFX.explosion();
               ctx.toast(`🔥 ${net.players.get(b.owner)?.name} zestrzelił ${v?.name}`);
             }
             break;
