@@ -2,8 +2,22 @@
 // Two independent paths, first one that opens a data channel wins:
 //   1) Native WebRTC + public ntfy.sh (and mirrors) as signaling — no PeerJS cloud
 //   2) PeerJS cloud (0.peerjs.com) with the REAL PeerJS TURN servers
-// The previous build replaced PeerJS TURN with dead Metered OpenRelay, so phones
-// on LTE / client-isolated Wi-Fi hung until "Brak odpowiedzi — sprawdź kod".
+//
+// Diagnoza „pad nie łączy się, w konsoli zero błędów” (po PR #4):
+//   a) SPLIT-BRAIN MIRRORÓW — każda strona subskrybowała tylko SWÓJ aktywny mirror
+//      i niezależnie przełączała go po 429/błędzie. Publikacja lądowała tam, gdzie
+//      druga strona nie słuchała → cicha śmierć bez żadnego errora.
+//      Fix: SUBSKRYPCJE WS na OBU mirrorach od startu (nasłuch pasywny — nie zjada
+//      limitu POST ~1 req/5 s), PUBLIKACJA zawsze na JEDNYM aktywnym mirrorze
+//      z jednorazowym failoverem po 429/błędzie sieci.
+//   b) CHURN WS — onclose starego socketu planował reconnect, który co ~1,5 s
+//      zrywał zdrowe połączenie i gubił offer/answer. Fix: licznik generacji (gen)
+//      na slot mirrora; failover NIE rusza socketów (każdy mirror żyje własnym życiem).
+//   c) NIEMA SYGNALIZACJA — pełny ślad [airpad:net] na konsoli HOSTA + zdarzenie
+//      'trace' na ClientNet/HostNet, wyświetlane na ekranie pada (telefon nie ma DevTools).
+//      Błędy PeerJS są logowane zamiast połykanych.
+//   d) SAMOLECZENIE HANDSHAKE'U — jednorazowy retry oferty po OFFER_RETRY_MS bez
+//      odpowiedzi (przez DRUGI mirror, maks. +1 POST); host ponownie odpowiada na duplikat.
 
 export const PREFIX = 'airpad-x7k-';
 
@@ -31,12 +45,19 @@ export const ICE = {
 
 const NTFY_PRIMARY = 'https://ntfy.sh';
 const NTFY_FALLBACK = 'https://ntfy.envs.net';
+const MIRRORS = [NTFY_PRIMARY, NTFY_FALLBACK];
 // Limit publicznego ntfy: ~1 req / 5 s per IP (burst ~60). Cały ruch sygnalizacji
-// musi się w tym zmieścić — stąd JEDEN mirror, rzadkie hello i batchowanie ICE.
+// musi się w tym zmieścić — stąd JEDEN aktywny mirror publikacji, rzadkie hello,
+// batchowanie ICE i retry tylko tam, gdzie naprawdę trzeba.
 const HELLO_INTERVAL = 12000;
 const ICE_BATCH_MS = 100;
 const WS_BACKOFF_BASE = 1500;
 const WS_BACKOFF_CAP = 30000;
+const OFFER_RETRY_MS = 3000;
+
+const NS = '[airpad:net]';
+function netLog(...a) { try { console.log(NS, ...a); } catch (e) {} }
+function netWarn(...a) { try { console.warn(NS, ...a); } catch (e) {} }
 
 export function randomCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
@@ -71,107 +92,129 @@ function newPeer(id) {
 /* ----------------------------- ntfy bus ------------------------------ */
 
 class SignalBus {
-  constructor(code) {
+  // trace: fn(line) — każda linia śladu sygnalizacji (log + zdarzenie 'trace').
+  constructor(code, trace) {
     this.topic = topicFor(code);
     this.handlers = new Set();
-    this.ws = null;
-    // ZAWSZE publikujemy tylko na jeden (aktywny) mirror. Drugi to wyłącznie
-    // fallback po 429 / błędzie sieci — nigdy nie wysyłamy do obu naraz.
+    // Slot na MIRROR: { ws, gen, retry, timer }. Subskrypcje żyją niezależnie na
+    // obu mirrorach — przełączenie publikacji nigdy nie zamyka zdrowego socketu.
+    this.socks = new Map();
+    // Aktywny mirror TYLKO dla publikacji (POST). Drugi mirror = nasłuch + fallback.
     this.origin = NTFY_PRIMARY;
-    this.alive = false;
     this.stopped = false;
-    this._retry = 0;
-    this._retryTimer = null;
     this._warned = false;
+    this.trace = trace || netLog;
   }
 
   start() {
     this.stopped = false;
-    this._retry = 0;
-    this._connect();
+    this.trace('syg: start — nasłuch na obu mirrorach, publikacja na ' + this.origin);
+    for (const m of MIRRORS) this._ensureSub(m);
   }
 
-  _connect() {
+  _ensureSub(origin) {
     if (this.stopped) return;
-    this._clearRetry();
-    // Niezmiennik: najwyżej JEDNO połączenie WS, do aktywnego mirrora.
-    try { if (this.ws) this.ws.close(); } catch (e) {}
-    this.ws = null;
-    const wsUrl = this.origin.replace('https://', 'wss://') + '/' + this.topic + '/ws';
+    let s = this.socks.get(origin);
+    if (!s) {
+      s = { ws: null, gen: 0, retry: 0, timer: null };
+      this.socks.set(origin, s);
+    }
+    if (!s.ws) this._openSub(origin, s);
+  }
+
+  _openSub(origin, s) {
+    if (this.stopped) return;
+    const gen = ++s.gen; // nieświeży socket (po stop/ponownym otwarciu) nic już nie planuje
+    const wsUrl = origin.replace('https://', 'wss://') + '/' + this.topic + '/ws';
     let ws;
-    try { ws = new WebSocket(wsUrl); } catch (e) { this._scheduleReconnect(); return; }
-    this.ws = ws;
-    ws.onopen = () => { this.alive = true; this._retry = 0; };
+    try { ws = new WebSocket(wsUrl); } catch (e) { this._scheduleReconnect(origin, s); return; }
+    s.ws = ws;
+    const stale = () => this.stopped || s.gen !== gen || s.ws !== ws;
+    ws.onopen = () => {
+      if (stale()) return;
+      s.retry = 0;
+      this.trace('syg: WS ' + origin + ' → połączony (nasłuch)');
+    };
     ws.onmessage = (ev) => {
+      if (stale()) return;
       try {
         const wrap = JSON.parse(ev.data);
         if (wrap.event && wrap.event !== 'message') return;
         const raw = wrap.message != null ? wrap.message : ev.data;
         const msg = typeof raw === 'string' ? JSON.parse(raw) : raw;
-        if (msg && msg.t) for (const h of this.handlers) h(msg);
-      } catch (e) { /* ignore keepalives */ }
+        if (msg && msg.t) for (const h of this.handlers) { try { h(msg); } catch (e) {} }
+      } catch (e) { /* keepalive / binarne */ }
     };
-    ws.onerror = () => { try { ws.close(); } catch (e) {} };
+    ws.onerror = () => { if (!stale()) { try { ws.close(); } catch (e) {} } };
     ws.onclose = () => {
-      if (this.ws === ws) this.ws = null;
-      this._scheduleReconnect();
+      if (stale()) return;
+      if (s.ws === ws) s.ws = null;
+      this.trace('syg: WS ' + origin + ' zamknięty — reconnect z backoffem');
+      this._scheduleReconnect(origin, s);
     };
   }
 
-  _clearRetry() {
-    if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null; }
-  }
-
-  // Wykładniczy backoff z jitterem: 1.5s → 3s → 6s → 12s → 24s → 30s (cap).
-  // Stałe 1500 ms bez backoffa podtrzymywało blokadę 429 w nieskończoność.
-  _scheduleReconnect() {
+  _scheduleReconnect(origin, s) {
     if (this.stopped) return;
-    const delay = Math.min(WS_BACKOFF_CAP, WS_BACKOFF_BASE * 2 ** this._retry) + Math.random() * 1000;
-    this._retry++;
-    this._clearRetry();
-    this._retryTimer = setTimeout(() => {
-      this._retryTimer = null;
-      if (!this.stopped) this._connect();
+    const delay = Math.min(WS_BACKOFF_CAP, WS_BACKOFF_BASE * 2 ** s.retry) + Math.random() * 1000;
+    s.retry++;
+    if (s.timer) clearTimeout(s.timer);
+    s.timer = setTimeout(() => {
+      s.timer = null;
+      if (!this.stopped) this._openSub(origin, s);
     }, delay);
   }
 
   _warnOnce(msg) {
     if (this._warned) return;
     this._warned = true;
-    console.warn('[airpad] ' + msg);
+    netWarn(msg);
   }
 
+  // Przełącza TYLKO mirror publikacji. Socketów nie tyka — oba i tak słuchają.
   _adoptMirror(next, reason) {
     if (this.origin === next) return;
     this.origin = next;
-    this._warnOnce('sygnalizacja: ' + reason + ' — przełączam na ' + next);
-    this._retry = 0;
-    if (!this.stopped) this._connect();
+    this.trace('syg: publikacja → ' + next + ' (' + reason + ')');
+    this._ensureSub(next);
   }
 
   // Jednorazowy retry uszkodzonej wiadomości na drugim mirrorze (sekwencyjnie,
   // nigdy równolegle do obu). Przy sukcesie mirror staje się nowym aktywnym.
   _failover(failedOrigin, body, reason) {
+    if (this.stopped) return;
     const next = failedOrigin === NTFY_PRIMARY ? NTFY_FALLBACK : NTFY_PRIMARY;
+    this.trace('syg: publikacja nie przeszła (' + reason + ') — retry na ' + next);
     fetch(next + '/' + this.topic, { method: 'POST', body }).then(
       (res2) => {
         if (res2 && res2.ok) this._adoptMirror(next, reason + ' na ' + failedOrigin);
-        else this._warnOnce('sygnalizacja: ' + reason + ' na ' + failedOrigin + ' (fallback też nie odpowiada)');
+        else this._warnOnce('syg: ' + reason + ' na ' + failedOrigin + ' (fallback też nie odpowiada)');
       },
-      () => this._warnOnce('sygnalizacja: ' + reason + ' na ' + failedOrigin + ' (fallback też nie odpowiada)'),
+      () => this._warnOnce('syg: ' + reason + ' na ' + failedOrigin + ' (fallback też nie odpowiada)'),
     );
+  }
+
+  // Retry przez DRUGI mirror bez czekania na błąd POST — np. oferta bez odpowiedzi,
+  // gdy publikacja trafiła na mirror, którego WS nie dowozi drugiej stronie.
+  resendOtherMirror(obj) {
+    if (this.stopped) return;
+    const next = this.origin === NTFY_PRIMARY ? NTFY_FALLBACK : NTFY_PRIMARY;
+    this._adoptMirror(next, 'retry przez drugi mirror');
+    this.send(obj);
   }
 
   on(fn) { this.handlers.add(fn); return () => this.handlers.delete(fn); }
 
-  send(obj) {
+  send(obj, quiet = false) {
     const body = JSON.stringify(obj);
     const origin = this.origin;
+    if (!quiet) this.trace('syg: → POST {t:' + obj.t + '} na ' + origin);
     fetch(origin + '/' + this.topic, { method: 'POST', body }).then(
       (res) => {
         if (!res || res.ok) return;
         // 429 / 5xx → fallback. Inne 4xx to błąd treści — retry nic nie da.
         if (res.status === 429 || res.status >= 500) this._failover(origin, body, 'HTTP ' + res.status);
+        else this._warnOnce('syg: publikacja na ' + origin + ' → HTTP ' + res.status + ' (ignoruję)');
       },
       () => this._failover(origin, body, 'błąd sieci'),
     );
@@ -179,9 +222,13 @@ class SignalBus {
 
   stop() {
     this.stopped = true;
-    this._clearRetry();
-    try { if (this.ws) this.ws.close(); } catch (e) {}
-    this.ws = null;
+    for (const s of this.socks.values()) {
+      s.gen++; // unieważnij onclose/onopen starych socketów
+      if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+      try { if (s.ws) s.ws.close(); } catch (e) {}
+      s.ws = null;
+    }
+    this.socks.clear();
     this.handlers.clear();
   }
 }
@@ -289,6 +336,11 @@ export class HostNet extends EventTarget {
     this.status = 'init';
   }
 
+  _trace(line) {
+    netLog(line);
+    this.emit('trace', line);
+  }
+
   async start() {
     for (let attempt = 0; attempt < 12; attempt++) {
       const code = randomCode();
@@ -298,12 +350,14 @@ export class HostNet extends EventTarget {
       if (peer && peer !== 'fail') this.peer = peer;
       this._startRtc(code);
       this.status = this.peer ? 'peerjs+rtc' : 'rtc';
+      this._trace('host: start pokoju ' + code + ' (ścieżka: ' + this.status + ')');
       return code;
     }
     // last resort: RTC only, no uniqueness check
     this.code = randomCode();
     this._startRtc(this.code);
     this.status = 'rtc';
+    this._trace('host: start pokoju ' + this.code + ' (ścieżka: rtc, bez sprawdzania PeerJS)');
     return this.code;
   }
 
@@ -315,13 +369,21 @@ export class HostNet extends EventTarget {
       const fail = (err) => {
         clearTimeout(timer);
         try { peer.destroy(); } catch (e) {}
-        resolve(err && err.type === 'unavailable-id' ? 'taken' : 'fail');
+        const type = err && (err.type || err.message);
+        if (err && err.type === 'unavailable-id') {
+          this._trace('host: PeerJS — kod zajęty (' + code + '), próbuję inny');
+          resolve('taken');
+        } else {
+          this._trace('host: PeerJS błąd: ' + (type || 'nieznany') + ' — sygnalizacja pójdzie WebRTC/ntfy');
+          resolve('fail');
+        }
       };
       peer.on('error', fail);
       peer.on('open', () => {
         clearTimeout(timer);
         peer.off('error', fail);
-        peer.on('error', (e) => console.warn('peer error', e));
+        this._trace('host: PeerJS otwarty (' + peer.id + ')');
+        peer.on('error', (e) => { this._trace('host: PeerJS błąd: ' + (e && (e.type || e.message))); });
         peer.on('connection', (conn) => this._onPeerConn(conn));
         resolve(peer);
       });
@@ -333,6 +395,7 @@ export class HostNet extends EventTarget {
     // ustawienia z peer.connect(...): serialization:'json' + reliable:true, więc
     // obie strony mówią JSON-em po niezawodnym kanale.
     const attach = () => {
+      this._trace('host: kanał PeerJS od ' + conn.peer);
       conn.on('data', (msg) => this._onData({ send: (m) => { try { conn.send(m); } catch (e) {} }, peer: conn.peer }, msg));
     };
     if (conn.open) attach();
@@ -342,7 +405,7 @@ export class HostNet extends EventTarget {
   }
 
   _startRtc(code) {
-    this.bus = new SignalBus(code);
+    this.bus = new SignalBus(code, (l) => this._trace('host: ' + l));
     this.hostId = 'h' + rid(8);
     this._iceBuf = new Map();
     this.bus.on((msg) => this._onSignal(msg));
@@ -354,14 +417,13 @@ export class HostNet extends EventTarget {
 
   // Hello: raz ~150 ms po starcie, potem co HELLO_INTERVAL (12 s — limit ntfy
   // to 1 req / 5 s) i TYLKO dopóki żaden zdalny pad nie jest podłączony.
-  // Stałe hello co 2.5 s × 2 mirrory = ~0.8 req/s z jednego IP — to samo
-  // w sobie przekraczało limit i po 1–2 min kończyło się blokadą 429.
   _startHello() {
     if (!this.bus || this._helloTimer || this._helloTimeout) return;
-    const hello = () => { try { this.bus.send({ t: 'host', from: this.hostId }); } catch (e) {} };
+    const hello = () => { try { this.bus.send({ t: 'host', from: this.hostId }, true); } catch (e) {} };
     this._helloTimeout = setTimeout(() => {
       this._helloTimeout = null;
       hello();
+      this._trace('host: hello — sygnalizacja aktywna (host ' + this.hostId + ')');
       if (this.bus && !this._helloTimer) this._helloTimer = setInterval(hello, HELLO_INTERVAL);
     }, 150);
   }
@@ -379,7 +441,16 @@ export class HostNet extends EventTarget {
   async _onSignal(msg) {
     if (!msg || msg.from === this.hostId) return;
     if (msg.t === 'offer' && msg.sdp) {
-      if (this.pcs.has(msg.from)) return;
+      const existing = this.pcs.get(msg.from);
+      if (existing && existing.pc) {
+        // Duplikat oferty — pad ponowił ją, bo nie doczekał się odpowiedzi
+        // (np. zgubiony POST). Odpowiadamy ponownie zapamiętanym SDP.
+        if (existing.answer) {
+          this._trace('host: duplikat oferty od ' + msg.from + ' — ponawiam odpowiedź');
+          this.bus.send({ t: 'answer', from: this.hostId, to: msg.from, sdp: existing.answer });
+        }
+        return;
+      }
       await this._answer(msg);
     } else if (msg.t === 'ice') {
       const cands = iceList(msg);
@@ -398,11 +469,12 @@ export class HostNet extends EventTarget {
   async _answer(msg) {
     const pc = new RTCPeerConnection(ICE);
     const q = [];
-    const slot = { pc, q, ch: null, batcher: null };
+    const slot = { pc, q, ch: null, batcher: null, answer: null };
     this.pcs.set(msg.from, slot);
     slot.batcher = new IceBatcher((candidates) => {
       this.bus.send({ t: 'ice', from: this.hostId, to: msg.from, candidates });
     });
+    this._trace('host: ← oferta od ' + msg.from);
     wirePC(pc, (ch) => this._bindRtcChan(msg.from, ch), (cand) => slot.batcher.push(cand));
     try {
       if (msg.sdp) {
@@ -417,10 +489,13 @@ export class HostNet extends EventTarget {
         await flushIce(pc, q);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        this.bus.send({ t: 'answer', from: this.hostId, to: msg.from, sdp: pc.localDescription.sdp });
+        slot.answer = pc.localDescription.sdp;
+        this.bus.send({ t: 'answer', from: this.hostId, to: msg.from, sdp: slot.answer });
+        this._trace('host: → odpowiedź do ' + msg.from);
       }
     } catch (e) {
-      console.warn('answer failed', e);
+      this._trace('host: błąd odpowiedzi dla ' + msg.from + ': ' + (e && e.message));
+      netWarn('answer failed', e);
       try { slot.batcher.clear(); } catch (err) {}
       this.pcs.delete(msg.from);
       try { pc.close(); } catch (err) {}
@@ -430,6 +505,7 @@ export class HostNet extends EventTarget {
   _bindRtcChan(id, ch) {
     const slot = this.pcs.get(id);
     if (slot) slot.ch = ch;
+    this._trace('host: kanał WebRTC z ' + id + ' otwarty');
     const conn = {
       peer: id,
       send: (m) => sendJSON(ch, m),
@@ -451,6 +527,7 @@ export class HostNet extends EventTarget {
         ping: 0,
       };
       this.players.set(conn.peer, p);
+      this._trace('host: join od ' + conn.peer + ' (' + p.name + ') — graczy: ' + this.players.size);
       // Pierwszy gracz dołączył — sygnalizacja nie jest już potrzebna w tle.
       this._stopHello();
       conn.send({ t: 'welcome', color: p.color, index: this.players.size - 1 });
@@ -499,6 +576,7 @@ export class HostNet extends EventTarget {
       this.pcs.delete(id);
     }
     if (this.players.delete(id)) {
+      this._trace('host: rozłączono ' + id);
       this.emit('players');
       // Lobby opustoszało (został co najwyżej lokalny gracz) — wznów hello.
       if (!this._hasRemotePlayers()) this._startHello();
@@ -545,6 +623,11 @@ export class ClientNet extends EventTarget {
     this._send = null;
   }
 
+  _trace(line) {
+    netLog(line);
+    try { this.dispatchEvent(new CustomEvent('trace', { detail: line })); } catch (e) {}
+  }
+
   connect(code, name) {
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -584,16 +667,28 @@ export class ClientNet extends EventTarget {
   }
 
   _connectPeer(code, name, win, cleaners) {
-    if (typeof Peer === 'undefined') return;
+    if (typeof Peer === 'undefined') {
+      this._trace('pad: biblioteka PeerJS niedostępna — tylko WebRTC/ntfy');
+      return;
+    }
     let peer, conn;
-    try { peer = newPeer(undefined); } catch (e) { return; }
+    try { peer = newPeer(undefined); } catch (e) {
+      this._trace('pad: nie udało się utworzyć PeerJS: ' + (e && e.message));
+      return;
+    }
     this.peer = peer;
-    cleaners.peer = () => {
+    const cleanupPeer = () => {
       try { conn && conn.close(); } catch (e) {}
       try { peer.destroy(); } catch (e) {}
     };
-    peer.on('error', () => {});
+    cleaners.peer = cleanupPeer;
+    this._trace('pad: PeerJS — łączę z chmurą 0.peerjs.com');
+    peer.on('error', (e) => {
+      this._trace('pad: PeerJS błąd: ' + (e && (e.type || e.message)) || 'nieznany');
+      netWarn('peerjs pad error', e);
+    });
     peer.on('open', () => {
+      this._trace('pad: PeerJS otwarty — dzwonię do hosta (' + PREFIX + code + ')');
       setTimeout(() => {
         if (this._send) return;
         conn = peer.connect(PREFIX + code, { reliable: true, serialization: 'json' });
@@ -602,17 +697,21 @@ export class ClientNet extends EventTarget {
           const snd = (msg) => { try { if (conn.open) conn.send(msg); } catch (e) {} };
           if (!win('peer', snd)) { try { conn.close(); } catch (e) {} return; }
           this.conn = conn;
+          this._trace('pad: kanał PeerJS otwarty — wysyłam join');
           conn.on('data', (m) => this.dispatchEvent(new CustomEvent('msg', { detail: m })));
-          conn.on('close', () => this.dispatchEvent(new Event('close')));
-          conn.on('error', () => this.dispatchEvent(new Event('close')));
+          conn.on('close', () => { cleanupPeer(); this.dispatchEvent(new Event('close')); });
+          conn.on('error', () => { cleanupPeer(); this.dispatchEvent(new Event('close')); });
           conn.send({ t: 'join', name });
+        });
+        conn.on('error', (e) => {
+          this._trace('pad: PeerJS połączenie — błąd: ' + (e && (e.type || e.message)) || 'nieznany');
         });
       }, 350);
     });
   }
 
   _connectRtc(code, name, win, cleaners) {
-    const bus = new SignalBus(code);
+    const bus = new SignalBus(code, (l) => this._trace('pad: ' + l));
     this.bus = bus;
     const me = 'c' + rid(8);
     const pc = new RTCPeerConnection(ICE);
@@ -623,42 +722,102 @@ export class ClientNet extends EventTarget {
     const batcher = new IceBatcher((candidates) => {
       bus.send({ t: 'ice', from: me, to: this._hostId, candidates });
     });
-    cleaners.rtc = () => { batcher.clear(); try { pc.close(); bus.stop(); } catch (e) {} };
+    let answered = false;
+    let offerTimer = null;
+    let wonLocal = false;
+    const disarmOfferRetry = () => {
+      if (offerTimer) { clearTimeout(offerTimer); offerTimer = null; }
+    };
+    const cleanupRtc = () => {
+      batcher.clear();
+      disarmOfferRetry();
+      try { pc.close(); } catch (e) {}
+      bus.stop();
+    };
+    cleaners.rtc = cleanupRtc;
 
     bus.on(async (msg) => {
       if (!msg || msg.from === me) return;
-      if (msg.t === 'host') this._hostId = msg.from;
+      if (msg.t === 'host') {
+        const first = !this._hostId;
+        this._hostId = msg.from;
+        if (first) this._trace('pad: host obecny (' + msg.from + ')');
+      }
       if (msg.t === 'answer' && msg.to === me && msg.sdp) {
         try {
           if (!pc.currentRemoteDescription) {
+            answered = true;
+            disarmOfferRetry();
             await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
             await flushIce(pc, q);
+            this._trace('pad: ← odpowiedź hosta — zestawiam ICE');
           }
-        } catch (e) { console.warn(e); }
+        } catch (e) {
+          this._trace('pad: błąd przy odpowiedzi hosta: ' + (e && e.message));
+          netWarn(e);
+        }
       }
       if (msg.t === 'ice' && (msg.to === me || !msg.to)) {
         for (const c of iceList(msg)) await addIce(pc, c, q);
       }
     });
     bus.start();
+    this._trace('pad: sygnalizacja ntfy — kod ' + code + ', ja=' + me);
 
     pc.onicecandidate = (e) => {
       if (e.candidate) batcher.push(e.candidate);
     };
+    pc.oniceconnectionstatechange = () => {
+      const st = pc.iceConnectionState;
+      if (st === 'connected' || st === 'completed') { disarmOfferRetry(); this._trace('pad: ICE ' + st); }
+      else if (st === 'failed' || st === 'disconnected') this._trace('pad: ICE ' + st);
+    };
 
+    const finishRtc = () => {
+      disarmOfferRetry();
+      // Zwycięzca tylko jeden — join leci wyłącznie z tej ścieżki.
+      const snd = (msg) => sendJSON(ch, msg);
+      if (!win('rtc', snd)) { try { ch.close(); } catch (e) {} return; }
+      wonLocal = true;
+      attachChan(ch, (m) => this.dispatchEvent(new CustomEvent('msg', { detail: m })),
+        () => { cleanupRtc(); this.dispatchEvent(new Event('close')); });
+      this._trace('pad: kanał WebRTC otwarty — wysyłam join');
+      sendJSON(ch, { t: 'join', name });
+    };
     const go = async () => {
       try {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
+        this._trace('pad: → oferta WebRTC');
         bus.send({ t: 'offer', from: me, sdp: pc.localDescription.sdp });
-        await waitOpen(ch, 16000);
-        // Zwycięzca tylko jeden — join leci wyłącznie z tej ścieżki.
-        const snd = (msg) => sendJSON(ch, msg);
-        if (!win('rtc', snd)) { try { ch.close(); } catch (e) {} return; }
-        attachChan(ch, (m) => this.dispatchEvent(new CustomEvent('msg', { detail: m })),
-          () => this.dispatchEvent(new Event('close')));
-        sendJSON(ch, { t: 'join', name });
-      } catch (e) { /* peer path may still win */ }
+        // Samoleczenie handshake'u: jeśli host nie odpowiedział w OFFER_RETRY_MS,
+        // wyślij ofertę jeszcze raz przez DRUGI mirror (maks. +1 POST). Host
+        // odpowiada ponownie na duplikat, więc zgubiona odpowiedź się odtwarza.
+        offerTimer = setTimeout(() => {
+          offerTimer = null;
+          if (answered || wonLocal || bus.stopped) return;
+          if (pc.signalingState === 'closed') return;
+          this._trace('pad: brak odpowiedzi hosta przez ' + OFFER_RETRY_MS + ' ms — ponawiam ofertę');
+          bus.resendOtherMirror({ t: 'offer', from: me, sdp: pc.localDescription.sdp });
+        }, OFFER_RETRY_MS);
+        try {
+          await waitOpen(ch, 16000);
+          finishRtc();
+        } catch (e) {
+          // Kanał nie otworzył się w 16 s (np. bardzo wolny TURN) — ale connect()
+          // ma limit 18 s: nie rezygnuj z RTC, jeśli kanał otworzy się w ostatniej chwili.
+          disarmOfferRetry();
+          if (e && e.message === 'timeout') {
+            this._trace('pad: kanał nie otworzył się w 16 s — nasłuchuję do końca limitu');
+            ch.onopen = () => { if (!this._send && ch.readyState === 'open') finishRtc(); };
+          } else {
+            this._trace('pad: błąd kanału WebRTC: ' + (e && e.message ? e.message : e));
+          }
+        }
+      } catch (e) {
+        disarmOfferRetry();
+        this._trace('pad: błąd WebRTC: ' + (e && e.message ? e.message : e));
+      }
     };
     setTimeout(go, 400);
   }
