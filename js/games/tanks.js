@@ -1,9 +1,11 @@
 import { THREE, ground, gridHelper, avatar, nameSprite, clamp } from '../engine.js';
+import { makeSparks, shake } from '../fx.js';
+import * as SFX from '../audio.js';
 
 export const meta = {
   id: 'tanks',
   title: 'Tank Arena',
-  tagline: 'Deathmatch czołgów 3D — 15 fragów wygrywa',
+  tagline: 'Czołgi 3D zza ramienia — 15 fragów, wybuchy, turbo',
   color: '#8ce05a',
   tag: 'AKCJA',
   min: 1, max: 8,
@@ -17,6 +19,7 @@ export function start(ctx) {
   const { scene, camera, net, hud } = ctx;
   const world = new THREE.Group(); scene.add(world);
   ground(world, 240, 0x2a2f1f); gridHelper(world, 240, 48, 0x4a5a3a, 0x333c28);
+  const sparks = makeSparks(world, 200);
 
   const R = 100;
   const wallMat = new THREE.MeshStandardMaterial({ color: 0x6b5b3e, roughness: 0.9 });
@@ -104,6 +107,8 @@ export function start(ctx) {
           world.add(m);
           bullets.push({ m, dir, life: 2.6, owner: p.id });
           net.send(p, { t: 'rumble', ms: 40 });
+          sparks.burst(m.position.x, 1.1, m.position.z, 0xffc44a, 6, 6);
+          SFX.beep(220, 0.06, 'square', 0.08);
         }
         net.send(p, { t: 'hud', hp: Math.round(t.hp), kills: t.kills, turbo: t.turbo });
       }
@@ -132,9 +137,18 @@ export function start(ctx) {
         if (dead) { world.remove(b.m); bullets.splice(i, 1); }
       }
 
-      const a = performance.now() / 14000;
-      camera.position.set(Math.cos(a) * 40, 135, Math.sin(a) * 40 + 30);
-      camera.lookAt(0, 0, 0);
+      sparks.update(dt);
+      const lead = [...tanks.entries()].filter(([, t]) => t.dead <= 0).sort((a, b) => b[1].kills - a[1].kills)[0];
+      if (lead) {
+        const t = lead[1];
+        const back = new THREE.Vector3(-Math.sin(t.heading) * 16, 10, -Math.cos(t.heading) * 16);
+        camera.position.lerp(t.g.position.clone().add(back), 0.1);
+        camera.lookAt(t.g.position.x, 1.2, t.g.position.z);
+      } else {
+        const a = performance.now() / 14000;
+        camera.position.set(Math.cos(a) * 40, 135, Math.sin(a) * 40 + 30);
+        camera.lookAt(0, 0, 0);
+      }
       hud(rank().map((r, i) => `${i + 1}. <b style="color:${r.color}">${r.name}</b> — ${r.score} 💀`).join('<br>'));
     },
     dispose() { scene.remove(world); },

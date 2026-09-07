@@ -23,7 +23,7 @@ function screenConnect(err = '') {
       <input class="inp" id="name" maxlength="12" placeholder="Twój nick" value="${esc(name)}">
       <div class="err" id="err">${esc(err)}</div>
       <button class="btn primary big" id="go" style="width:100%;justify-content:center">🔗 Połącz</button>
-      <p style="color:var(--dim);font-size:12px;margin-top:22px">Nie masz kodu? Otwórz <b style="color:var(--amber)">AirPad</b> na komputerze lub TV i kliknij „Uruchom konsolę”.</p>
+      <p style="color:var(--dim);font-size:12px;margin-top:22px">Nie masz kodu? Otwórz <b style="color:var(--amber)">AirPad</b> na komputerze lub TV i kliknij „Uruchom konsolę”. Telefon nie musi być w tej samej sieci Wi‑Fi.</p>
     </div>
   </div>`;
   const go = document.getElementById('go');
@@ -32,14 +32,16 @@ function screenConnect(err = '') {
     const n = document.getElementById('name').value.trim() || 'Gracz';
     if (!/^\d{4}$/.test(c)) { document.getElementById('err').textContent = 'Kod to dokładnie 4 cyfry'; return; }
     localStorage.setItem('airpad.code', c); localStorage.setItem('airpad.name', n);
-    go.disabled = true; go.textContent = '⏳ Łączenie…';
-    try { await net.connect(c, n); buzz(60); screenWait(n); }
-    catch (e) { screenConnect(e.message || 'Nie udało się połączyć'); }
+    go.disabled = true; go.textContent = '⏳ Łączenie z konsolą…';
+    document.getElementById('err').textContent = 'Szukam ekranu (WebRTC + przekaźnik)…';
+    try { await net.connect(c, n); buzz(60); try { navigator.wakeLock && navigator.wakeLock.request('screen'); } catch (e) {} screenWait(n); }
+    catch (e) { screenConnect((e && e.message) || 'Nie udało się połączyć. Upewnij się, że konsola jest włączona i kod jest aktualny.'); }
   };
   document.getElementById('code').addEventListener('input', e => {
     e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4);
     if (e.target.value.length === 4) document.getElementById('name').focus();
   });
+  if (/^\d{4}$/.test(code) && name && !err) setTimeout(() => go.click(), 250);
 }
 
 function screenWait(name) {
