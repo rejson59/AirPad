@@ -84,7 +84,7 @@ export class HostNet extends EventTarget {
   _onData(conn, msg) {
     if (!msg || !msg.t) return;
     if (msg.t === 'join') {
-      const colors = ['#ff3b6b', '#31d0ff', '#ffd23f', '#4ade80', '#c084fc', '#fb923c', '#f472b6', '#22d3ee'];
+      const colors = ['#ff8c12', '#ffd93d', '#ff5a1f', '#ffb347', '#ff3d00', '#ffe89a', '#d9560a', '#ffa64d'];
       const p = {
         id: conn.peer,
         name: (msg.name || 'Gracz').slice(0, 12),
