@@ -29,7 +29,14 @@ export const ICE = {
   iceCandidatePoolSize: 8,
 };
 
-const NTFY = ['https://ntfy.sh', 'https://ntfy.envs.net'];
+const NTFY_PRIMARY = 'https://ntfy.sh';
+const NTFY_FALLBACK = 'https://ntfy.envs.net';
+// Limit publicznego ntfy: ~1 req / 5 s per IP (burst ~60). Cały ruch sygnalizacji
+// musi się w tym zmieścić — stąd JEDEN mirror, rzadkie hello i batchowanie ICE.
+const HELLO_INTERVAL = 12000;
+const ICE_BATCH_MS = 100;
+const WS_BACKOFF_BASE = 1500;
+const WS_BACKOFF_CAP = 30000;
 
 export function randomCode() {
   return String(Math.floor(1000 + Math.random() * 9000));
@@ -67,22 +74,34 @@ class SignalBus {
   constructor(code) {
     this.topic = topicFor(code);
     this.handlers = new Set();
-    this.sockets = [];
+    this.ws = null;
+    // ZAWSZE publikujemy tylko na jeden (aktywny) mirror. Drugi to wyłącznie
+    // fallback po 429 / błędzie sieci — nigdy nie wysyłamy do obu naraz.
+    this.origin = NTFY_PRIMARY;
     this.alive = false;
+    this.stopped = false;
+    this._retry = 0;
+    this._retryTimer = null;
+    this._warned = false;
   }
 
   start() {
-    for (const origin of NTFY) {
-      const wsUrl = origin.replace('https://', 'wss://') + '/' + this.topic + '/ws';
-      this._open(wsUrl, origin);
-    }
+    this.stopped = false;
+    this._retry = 0;
+    this._connect();
   }
 
-  _open(wsUrl, origin) {
+  _connect() {
+    if (this.stopped) return;
+    this._clearRetry();
+    // Niezmiennik: najwyżej JEDNO połączenie WS, do aktywnego mirrora.
+    try { if (this.ws) this.ws.close(); } catch (e) {}
+    this.ws = null;
+    const wsUrl = this.origin.replace('https://', 'wss://') + '/' + this.topic + '/ws';
     let ws;
-    try { ws = new WebSocket(wsUrl); } catch (e) { return; }
-    this.sockets.push({ ws, origin });
-    ws.onopen = () => { this.alive = true; };
+    try { ws = new WebSocket(wsUrl); } catch (e) { this._scheduleReconnect(); return; }
+    this.ws = ws;
+    ws.onopen = () => { this.alive = true; this._retry = 0; };
     ws.onmessage = (ev) => {
       try {
         const wrap = JSON.parse(ev.data);
@@ -92,23 +111,77 @@ class SignalBus {
         if (msg && msg.t) for (const h of this.handlers) h(msg);
       } catch (e) { /* ignore keepalives */ }
     };
+    ws.onerror = () => { try { ws.close(); } catch (e) {} };
     ws.onclose = () => {
-      setTimeout(() => { if (this.sockets.some(s => s.ws === ws)) this._open(wsUrl, origin); }, 1500);
+      if (this.ws === ws) this.ws = null;
+      this._scheduleReconnect();
     };
+  }
+
+  _clearRetry() {
+    if (this._retryTimer) { clearTimeout(this._retryTimer); this._retryTimer = null; }
+  }
+
+  // Wykładniczy backoff z jitterem: 1.5s → 3s → 6s → 12s → 24s → 30s (cap).
+  // Stałe 1500 ms bez backoffa podtrzymywało blokadę 429 w nieskończoność.
+  _scheduleReconnect() {
+    if (this.stopped) return;
+    const delay = Math.min(WS_BACKOFF_CAP, WS_BACKOFF_BASE * 2 ** this._retry) + Math.random() * 1000;
+    this._retry++;
+    this._clearRetry();
+    this._retryTimer = setTimeout(() => {
+      this._retryTimer = null;
+      if (!this.stopped) this._connect();
+    }, delay);
+  }
+
+  _warnOnce(msg) {
+    if (this._warned) return;
+    this._warned = true;
+    console.warn('[airpad] ' + msg);
+  }
+
+  _adoptMirror(next, reason) {
+    if (this.origin === next) return;
+    this.origin = next;
+    this._warnOnce('sygnalizacja: ' + reason + ' — przełączam na ' + next);
+    this._retry = 0;
+    if (!this.stopped) this._connect();
+  }
+
+  // Jednorazowy retry uszkodzonej wiadomości na drugim mirrorze (sekwencyjnie,
+  // nigdy równolegle do obu). Przy sukcesie mirror staje się nowym aktywnym.
+  _failover(failedOrigin, body, reason) {
+    const next = failedOrigin === NTFY_PRIMARY ? NTFY_FALLBACK : NTFY_PRIMARY;
+    fetch(next + '/' + this.topic, { method: 'POST', body }).then(
+      (res2) => {
+        if (res2 && res2.ok) this._adoptMirror(next, reason + ' na ' + failedOrigin);
+        else this._warnOnce('sygnalizacja: ' + reason + ' na ' + failedOrigin + ' (fallback też nie odpowiada)');
+      },
+      () => this._warnOnce('sygnalizacja: ' + reason + ' na ' + failedOrigin + ' (fallback też nie odpowiada)'),
+    );
   }
 
   on(fn) { this.handlers.add(fn); return () => this.handlers.delete(fn); }
 
   send(obj) {
     const body = JSON.stringify(obj);
-    for (const origin of NTFY) {
-      fetch(origin + '/' + this.topic, { method: 'POST', body }).catch(() => {});
-    }
+    const origin = this.origin;
+    fetch(origin + '/' + this.topic, { method: 'POST', body }).then(
+      (res) => {
+        if (!res || res.ok) return;
+        // 429 / 5xx → fallback. Inne 4xx to błąd treści — retry nic nie da.
+        if (res.status === 429 || res.status >= 500) this._failover(origin, body, 'HTTP ' + res.status);
+      },
+      () => this._failover(origin, body, 'błąd sieci'),
+    );
   }
 
   stop() {
-    for (const s of this.sockets) try { s.ws.close(); } catch (e) {}
-    this.sockets = [];
+    this.stopped = true;
+    this._clearRetry();
+    try { if (this.ws) this.ws.close(); } catch (e) {}
+    this.ws = null;
     this.handlers.clear();
   }
 }
@@ -118,10 +191,51 @@ class SignalBus {
 function wirePC(pc, onChan, onIce) {
   pc.onicecandidate = (e) => { if (e.candidate) onIce(e.candidate); };
   pc.ondatachannel = (e) => onChan(e.channel);
+  pc._iceRestarts = 0;
   pc.oniceconnectionstatechange = () => {
-    const st = pc.iceConnectionState;
-    if (st === 'failed') try { pc.restartIce(); } catch (e) {}
+    // Martwy peer nie może generować burzy kandydatów: maks. 2 restarty
+    // na połączenie, każdy z ~1 s opóźnieniem.
+    if (pc.iceConnectionState === 'failed' && pc._iceRestarts < 2) {
+      pc._iceRestarts++;
+      setTimeout(() => {
+        if (pc.signalingState === 'closed') return;
+        try { pc.restartIce(); } catch (e) {}
+      }, 1000);
+    }
   };
+}
+
+// Zbiera kandydatów ICE przez ~100 ms i wysyła JEDEN komunikat
+// {t:'ice', from, to, candidates:[...]} zamiast osobnego POST-a na kandydata.
+class IceBatcher {
+  constructor(send) {
+    this._send = send;
+    this._q = [];
+    this._t = null;
+  }
+  push(cand) {
+    this._q.push(iceJSON(cand));
+    if (!this._t) this._t = setTimeout(() => this.flush(), ICE_BATCH_MS);
+  }
+  flush() {
+    this._t = null;
+    if (!this._q.length) return;
+    const batch = this._q;
+    this._q = [];
+    try { this._send(batch); } catch (e) {}
+  }
+  clear() {
+    if (this._t) { clearTimeout(this._t); this._t = null; }
+    this._q = [];
+  }
+}
+
+// Odbiór: nowy format tablicowy + wsteczna kompatybilność z pojedynczym
+// {candidate:...} (np. pad z cache'u sprzed aktualizacji).
+function iceList(msg) {
+  if (Array.isArray(msg.candidates)) return msg.candidates;
+  if (msg.candidate) return [msg.candidate];
+  return [];
 }
 
 function attachChan(ch, onMsg, onClose) {
@@ -233,9 +347,33 @@ export class HostNet extends EventTarget {
     this._iceBuf = new Map();
     this.bus.on((msg) => this._onSignal(msg));
     this.bus.start();
-    const hello = () => this.bus.send({ t: 'host', from: this.hostId });
-    setTimeout(hello, 150);
-    this._helloTimer = setInterval(hello, 2500);
+    this._helloTimer = null;
+    this._helloTimeout = null;
+    this._startHello();
+  }
+
+  // Hello: raz ~150 ms po starcie, potem co HELLO_INTERVAL (12 s — limit ntfy
+  // to 1 req / 5 s) i TYLKO dopóki żaden zdalny pad nie jest podłączony.
+  // Stałe hello co 2.5 s × 2 mirrory = ~0.8 req/s z jednego IP — to samo
+  // w sobie przekraczało limit i po 1–2 min kończyło się blokadą 429.
+  _startHello() {
+    if (!this.bus || this._helloTimer || this._helloTimeout) return;
+    const hello = () => { try { this.bus.send({ t: 'host', from: this.hostId }); } catch (e) {} };
+    this._helloTimeout = setTimeout(() => {
+      this._helloTimeout = null;
+      hello();
+      if (this.bus && !this._helloTimer) this._helloTimer = setInterval(hello, HELLO_INTERVAL);
+    }, 150);
+  }
+
+  _stopHello() {
+    if (this._helloTimeout) { clearTimeout(this._helloTimeout); this._helloTimeout = null; }
+    if (this._helloTimer) { clearInterval(this._helloTimer); this._helloTimer = null; }
+  }
+
+  _hasRemotePlayers() {
+    for (const p of this.players.values()) if (!p.local) return true;
+    return false;
   }
 
   async _onSignal(msg) {
@@ -243,12 +381,15 @@ export class HostNet extends EventTarget {
     if (msg.t === 'offer' && msg.sdp) {
       if (this.pcs.has(msg.from)) return;
       await this._answer(msg);
-    } else if (msg.t === 'ice' && msg.candidate) {
+    } else if (msg.t === 'ice') {
+      const cands = iceList(msg);
+      if (!cands.length) return;
       const slot = this.pcs.get(msg.from);
-      if (slot) addIce(slot.pc, msg.candidate, slot.q);
-      else {
+      if (slot) {
+        for (const c of cands) await addIce(slot.pc, c, slot.q);
+      } else {
         const buf = this._iceBuf.get(msg.from) || [];
-        buf.push(msg.candidate);
+        buf.push(...cands);
         this._iceBuf.set(msg.from, buf);
       }
     }
@@ -257,11 +398,12 @@ export class HostNet extends EventTarget {
   async _answer(msg) {
     const pc = new RTCPeerConnection(ICE);
     const q = [];
-    const slot = { pc, q, ch: null };
+    const slot = { pc, q, ch: null, batcher: null };
     this.pcs.set(msg.from, slot);
-    wirePC(pc, (ch) => this._bindRtcChan(msg.from, ch), (cand) => {
-      this.bus.send({ t: 'ice', from: this.hostId, to: msg.from, candidate: iceJSON(cand) });
+    slot.batcher = new IceBatcher((candidates) => {
+      this.bus.send({ t: 'ice', from: this.hostId, to: msg.from, candidates });
     });
+    wirePC(pc, (ch) => this._bindRtcChan(msg.from, ch), (cand) => slot.batcher.push(cand));
     try {
       if (msg.sdp) {
         await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
@@ -279,6 +421,7 @@ export class HostNet extends EventTarget {
       }
     } catch (e) {
       console.warn('answer failed', e);
+      try { slot.batcher.clear(); } catch (err) {}
       this.pcs.delete(msg.from);
       try { pc.close(); } catch (err) {}
     }
@@ -308,6 +451,8 @@ export class HostNet extends EventTarget {
         ping: 0,
       };
       this.players.set(conn.peer, p);
+      // Pierwszy gracz dołączył — sygnalizacja nie jest już potrzebna w tle.
+      this._stopHello();
       conn.send({ t: 'welcome', color: p.color, index: this.players.size - 1 });
       this.emit('players');
       this.emit('join', p);
@@ -349,10 +494,15 @@ export class HostNet extends EventTarget {
   _remove(id) {
     const slot = this.pcs.get(id);
     if (slot) {
+      try { slot.batcher && slot.batcher.clear(); } catch (e) {}
       try { slot.pc.close(); } catch (e) {}
       this.pcs.delete(id);
     }
-    if (this.players.delete(id)) this.emit('players');
+    if (this.players.delete(id)) {
+      this.emit('players');
+      // Lobby opustoszało (został co najwyżej lokalny gracz) — wznów hello.
+      if (!this._hasRemotePlayers()) this._startHello();
+    }
   }
 
   emit(name, detail) {
@@ -470,7 +620,10 @@ export class ClientNet extends EventTarget {
     const q = [];
     const ch = pc.createDataChannel('pad', { ordered: true });
     this.ch = ch;
-    cleaners.rtc = () => { try { pc.close(); bus.stop(); } catch (e) {} };
+    const batcher = new IceBatcher((candidates) => {
+      bus.send({ t: 'ice', from: me, to: this._hostId, candidates });
+    });
+    cleaners.rtc = () => { batcher.clear(); try { pc.close(); bus.stop(); } catch (e) {} };
 
     bus.on(async (msg) => {
       if (!msg || msg.from === me) return;
@@ -483,12 +636,14 @@ export class ClientNet extends EventTarget {
           }
         } catch (e) { console.warn(e); }
       }
-      if (msg.t === 'ice' && msg.candidate && (msg.to === me || !msg.to)) addIce(pc, msg.candidate, q);
+      if (msg.t === 'ice' && (msg.to === me || !msg.to)) {
+        for (const c of iceList(msg)) await addIce(pc, c, q);
+      }
     });
     bus.start();
 
     pc.onicecandidate = (e) => {
-      if (e.candidate) bus.send({ t: 'ice', from: me, to: this._hostId, candidate: iceJSON(e.candidate) });
+      if (e.candidate) batcher.push(e.candidate);
     };
 
     const go = async () => {
