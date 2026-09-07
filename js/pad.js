@@ -1,4 +1,4 @@
-import { ClientNet } from './net.js?v=20260907b';
+import { ClientNet } from './net.js?v=20260907c';
 
 const app = document.getElementById('app');
 const net = new ClientNet();
@@ -10,6 +10,26 @@ let autoTried = false;
 
 const esc = s => String(s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
 const buzz = ms => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} };
+
+// Ślad sygnalizacji [airpad:net] na ekranie pada — telefon nie ma DevTools,
+// więc błędy „cichej śmierci” widać tu bezpośrednio podczas łączenia.
+function pushTrace(line) {
+  let box = document.getElementById('nettrace');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'nettrace';
+    box.setAttribute('style',
+      'position:fixed;left:0;right:0;bottom:0;z-index:999;max-height:34vh;overflow:auto;pointer-events:none;' +
+      'font:10px/1.5 ui-monospace,Menlo,Consolas,monospace;color:#8aa0b8;background:rgba(4,8,16,.74);' +
+      'padding:6px 10px;text-align:left;white-space:pre-wrap;word-break:break-all');
+    document.body.appendChild(box);
+  }
+  const d = document.createElement('div');
+  d.textContent = line;
+  box.appendChild(d);
+  while (box.childNodes.length > 40) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
 
 /* ---------------------- connect ---------------------- */
 function screenConnect(err = '') {
@@ -221,6 +241,7 @@ net.addEventListener('msg', e => {
   else if (m.t === 'over') buzz([80, 60, 80]);
 });
 net.addEventListener('close', () => screenConnect('Rozłączono z ekranem'));
+net.addEventListener('trace', e => pushTrace(e.detail));
 
 setInterval(() => net.send({ t: 'in', ax: +state.ax.toFixed(2), ay: +state.ay.toFixed(2), b: state.btn }), 33);
 addEventListener('contextmenu', e => e.preventDefault());

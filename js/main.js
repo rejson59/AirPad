@@ -1,5 +1,5 @@
 import { THREE, makeRenderer, basicScene } from './engine.js';
-import { HostNet } from './net.js?v=20260907b';
+import { HostNet } from './net.js?v=20260907c';
 import { GAMES, EMOJI, CATS, byId } from './games/index.js';
 import { unlockAudio, countdownTone, stopEngine } from './audio.js';
 
