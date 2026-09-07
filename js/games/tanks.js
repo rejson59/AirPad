@@ -4,11 +4,12 @@ export const meta = {
   id: 'tanks',
   title: 'Tank Arena',
   tagline: 'Deathmatch czołgów 3D — 15 fragów wygrywa',
-  color: '#4ade80',
+  color: '#8ce05a',
+  tag: 'AKCJA',
   min: 1, max: 8,
   controls: { stick: true, buttons: [
-    { id: 'a', label: 'STRZAŁ', color: '#ff3b6b' },
-    { id: 'b', label: 'TURBO', color: '#31d0ff' },
+    { id: 'a', label: 'STRZAŁ', color: 'linear-gradient(180deg,#ff6a5a,#c22412)' },
+    { id: 'b', label: 'TURBO', color: 'linear-gradient(180deg,#5ac8e0,#1279a0)' },
   ], aim: true },
 };
 

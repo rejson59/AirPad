@@ -4,11 +4,12 @@ export const meta = {
   id: 'sumo',
   title: 'Sumo Balls',
   tagline: 'Wypchnij wszystkich z areny! Ostatni żywy wygrywa',
-  color: '#ffd23f',
+  color: '#ffd24a',
+  tag: 'PARTY',
   min: 2, max: 8,
   controls: { stick: true, buttons: [
-    { id: 'a', label: 'DASH', color: '#ffd23f' },
-    { id: 'b', label: 'SKOK', color: '#31d0ff' },
+    { id: 'a', label: 'DASH', color: 'linear-gradient(180deg,#ffd24a,#e59b06)' },
+    { id: 'b', label: 'SKOK', color: 'linear-gradient(180deg,#5ac8e0,#1279a0)' },
   ] },
 };
 

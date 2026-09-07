@@ -4,11 +4,12 @@ export const meta = {
   id: 'space',
   title: 'Space Dogfight',
   tagline: 'Kosmiczne myśliwce — strzelaj, unikaj, przetrwaj',
-  color: '#c084fc',
+  color: '#a06cff',
+  tag: 'AKCJA',
   min: 1, max: 8,
   controls: { stick: true, buttons: [
-    { id: 'a', label: 'LASER', color: '#ff3b6b' },
-    { id: 'b', label: 'BOOST', color: '#c084fc' },
+    { id: 'a', label: 'LASER', color: 'linear-gradient(180deg,#ff6a5a,#c22412)' },
+    { id: 'b', label: 'BOOST', color: 'linear-gradient(180deg,#b98cff,#6a35d6)' },
   ] },
 };
 

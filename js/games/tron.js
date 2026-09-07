@@ -5,9 +5,10 @@ export const meta = {
   title: 'Neon Trails',
   tagline: 'Świetlne motory 3D — nie wjedź w ścianę światła!',
   color: '#31d0ff',
+  tag: 'RETRO',
   min: 2, max: 8,
   controls: { stick: true, buttons: [
-    { id: 'a', label: 'TURBO', color: '#31d0ff' },
+    { id: 'a', label: 'TURBO', color: 'linear-gradient(180deg,#5ac8e0,#1279a0)' },
   ] },
 };
 

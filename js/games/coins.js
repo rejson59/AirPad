@@ -4,11 +4,12 @@ export const meta = {
   id: 'coins',
   title: 'Coin Rush',
   tagline: 'Zbierz najwięcej monet w 90 sekund — omijaj bomby!',
-  color: '#31d0ff',
+  color: '#3aa0ff',
+  tag: 'ARCADE',
   min: 1, max: 8,
   controls: { stick: true, buttons: [
-    { id: 'a', label: 'SKOK', color: '#31d0ff' },
-    { id: 'b', label: 'SPRINT', color: '#ffd23f' },
+    { id: 'a', label: 'SKOK', color: 'linear-gradient(180deg,#5ac8e0,#1279a0)' },
+    { id: 'b', label: 'SPRINT', color: 'linear-gradient(180deg,#ffd24a,#e59b06)' },
   ] },
 };
 

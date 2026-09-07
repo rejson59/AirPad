@@ -4,12 +4,13 @@ export const meta = {
   id: 'kart',
   title: 'Turbo Kart',
   tagline: 'Wyścig 3D na 3 okrążenia — driftuj i wygrywaj!',
-  color: '#ff3b6b',
+  color: '#ff9a1f',
+  tag: 'WYŚCIG',
   min: 1, max: 8,
   controls: { stick: true, buttons: [
-    { id: 'a', label: 'GAZ', color: '#4ade80' },
-    { id: 'b', label: 'HAMULEC', color: '#ff3b6b' },
-    { id: 'x', label: 'BOOST', color: '#31d0ff' },
+    { id: 'a', label: 'GAZ', color: 'linear-gradient(180deg,#8ce05a,#3f9418)' },
+    { id: 'b', label: 'HAMULEC', color: 'linear-gradient(180deg,#ff6a5a,#c22412)' },
+    { id: 'x', label: 'BOOST', color: 'linear-gradient(180deg,#5ac8e0,#1279a0)' },
   ] },
 };
 
