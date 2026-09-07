@@ -2,6 +2,16 @@ import { THREE, makeRenderer, basicScene } from './engine.js';
 import { HostNet } from './net.js';
 import { GAMES, EMOJI, CATS, byId } from './games/index.js';
 
+/* Widoczny komunikat zamiast "martwej" strony, gdy coś nie wstanie */
+function fatal(msg) {
+  const b = document.createElement('div');
+  b.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:999;padding:14px 18px;font:600 14px Inter,sans-serif;' +
+    'background:linear-gradient(180deg,#ff8c12,#d9560a);color:#2a1204;box-shadow:0 6px 20px rgba(0,0,0,.6)';
+  b.textContent = '⚠ ' + msg;
+  document.body.appendChild(b);
+}
+addEventListener('error', e => { if (e.message) console.error(e.message); });
+
 const $ = (s) => document.querySelector(s);
 const ui = $('#ui');
 const landing = $('#landing');
@@ -55,7 +65,12 @@ async function boot(gameId) {
       <div style="font-size:44px" class="pulse">📡</div>
       <h2 style="margin:10px 0 4px">Tworzę pokój…</h2>
       <p style="color:var(--dim);margin:0">Łączenie z siecią P2P</p></div></div></div>`;
-  initGL();
+  try { initGL(); }
+  catch (e) {
+    console.error(e);
+    fatal('Nie udało się uruchomić grafiki 3D (WebGL). Włącz akcelerację sprzętową w przeglądarce.');
+    return;
+  }
   net = new HostNet();
   try { await net.start(); }
   catch (e) {

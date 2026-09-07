@@ -8,10 +8,7 @@
 <meta property="og:title" content="AirPad — konsola w przeglądarce">
 <meta property="og:description" content="Telefon jako pad, duży ekran jako konsola. 13 gier 3D, do 8 graczy, całkowicie za darmo.">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/style.css?v=1788797691">
+<link rel="stylesheet" href="css/style.css?v=1788797958">
 </head>
 <body>
 
@@ -63,8 +60,9 @@
 <div id="stage"><canvas id="cv"></canvas></div>
 <div id="ui"></div>
 
-<script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
-<script type="module" src="js/main.js?v=1788797691"></script>
+<script src="vendor/peerjs.min.js?v=1788797958"></script>
+<script src="vendor/qrcode.min.js?v=1788797958"></script>
+<script type="importmap">{"imports":{"three":"./vendor/three.module.js?v=1788797958"}}</script>
+<script type="module" src="js/main.js?v=1788797958"></script>
 </body>
 </html>

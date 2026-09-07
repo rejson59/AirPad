@@ -52,3 +52,8 @@ Strona musi działać po **HTTPS** (Pages/Vercel to zapewniają), aby WebRTC i w
 Utwórz `js/games/mojagra.js` eksportujący `meta` (id, title, tagline, color, tag, min, max, controls)
 oraz `start(ctx)` zwracający `{ update(dt), dispose() }` — wzór: `js/games/sumo.js`.
 Następnie dopisz import w `js/games/index.js`.
+
+## Zależności lokalne (vendor/)
+Three.js, PeerJS i QRCode.js są **dołączone lokalnie** w katalogu `vendor/` (≈770 KB) i mapowane przez
+`<script type="importmap">`. Dzięki temu strona działa nawet gdy CDN-y są niedostępne lub zablokowane
+(sieci firmowe, szkolne, blokery) i nie ma zewnętrznych zależności przy hostowaniu.
