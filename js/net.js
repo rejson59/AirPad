@@ -215,6 +215,9 @@ export class HostNet extends EventTarget {
   }
 
   _onPeerConn(conn) {
+    // Host nie inicjuje połączenia PeerJS — przychodzące conn dziedziczy po padzie
+    // ustawienia z peer.connect(...): serialization:'json' + reliable:true, więc
+    // obie strony mówią JSON-em po niezawodnym kanale.
     const attach = () => {
       conn.on('data', (msg) => this._onData({ send: (m) => { try { conn.send(m); } catch (e) {} }, peer: conn.peer }, msg));
     };
@@ -262,6 +265,13 @@ export class HostNet extends EventTarget {
     try {
       if (msg.sdp) {
         await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+        // Kandydaci ICE, którzy doszli zanim dotarł offer (np. wyprzedził go po drodze),
+        // czekali w _iceBuf — nie mogą zginąć po ustawieniu remoteDescription.
+        const pre = this._iceBuf.get(msg.from);
+        if (pre && pre.length) {
+          q.push(...pre);
+          this._iceBuf.delete(msg.from);
+        }
         await flushIce(pc, q);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
@@ -389,21 +399,27 @@ export class ClientNet extends EventTarget {
     return new Promise((resolve, reject) => {
       let settled = false;
       const cleaners = { peer: null, rtc: null };
+      let timer = null;
+      // Zwycięska ścieżka zwraca true — tylko ona może wysłać join.
+      // Przegrana zamyka się sama (cleaner), żeby nigdy nie było dual-joina.
       const win = (path, send) => {
         if (settled) {
           try { cleaners[path] && cleaners[path](); } catch (e) {}
-          return;
+          return false;
         }
         settled = true;
+        clearTimeout(timer);
         this._send = send;
         for (const k of Object.keys(cleaners)) {
           if (k !== path) try { cleaners[k] && cleaners[k](); } catch (e) {}
         }
         resolve();
+        return true;
       };
       const failAll = (err) => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         for (const k of Object.keys(cleaners)) try { cleaners[k] && cleaners[k](); } catch (e) {}
         reject(err);
       };
@@ -411,9 +427,9 @@ export class ClientNet extends EventTarget {
       this._connectRtc(code, name, win, cleaners);
       this._connectPeer(code, name, win, cleaners);
 
-      setTimeout(() => {
-        failAll(new Error('Brak odpowiedzi — sprawdź kod i czy konsola nadal jest otwarta'));
-      }, 20000);
+      timer = setTimeout(() => {
+        failAll(new Error('Nie udało się połączyć — sprawdź, czy kod (4 cyfry) jest poprawny i czy konsola jest otwarta na dużym ekranie.'));
+      }, 18000);
     });
   }
 
@@ -432,11 +448,13 @@ export class ClientNet extends EventTarget {
         if (this._send) return;
         conn = peer.connect(PREFIX + code, { reliable: true, serialization: 'json' });
         conn.on('open', () => {
-          if (this._send) { try { conn.close(); } catch (e) {} return; }
+          // Najpierw walcz o zwycięstwo, dopiero zwycięzca wysyła join.
+          const snd = (msg) => { try { if (conn.open) conn.send(msg); } catch (e) {} };
+          if (!win('peer', snd)) { try { conn.close(); } catch (e) {} return; }
           this.conn = conn;
           conn.on('data', (m) => this.dispatchEvent(new CustomEvent('msg', { detail: m })));
           conn.on('close', () => this.dispatchEvent(new Event('close')));
-          win('peer', (msg) => { try { if (conn.open) conn.send(msg); } catch (e) {} });
+          conn.on('error', () => this.dispatchEvent(new Event('close')));
           conn.send({ t: 'join', name });
         });
       }, 350);
@@ -479,10 +497,11 @@ export class ClientNet extends EventTarget {
         await pc.setLocalDescription(offer);
         bus.send({ t: 'offer', from: me, sdp: pc.localDescription.sdp });
         await waitOpen(ch, 16000);
-        if (this._send) return;
+        // Zwycięzca tylko jeden — join leci wyłącznie z tej ścieżki.
+        const snd = (msg) => sendJSON(ch, msg);
+        if (!win('rtc', snd)) { try { ch.close(); } catch (e) {} return; }
         attachChan(ch, (m) => this.dispatchEvent(new CustomEvent('msg', { detail: m })),
           () => this.dispatchEvent(new Event('close')));
-        win('rtc', (msg) => sendJSON(ch, msg));
         sendJSON(ch, { t: 'join', name });
       } catch (e) { /* peer path may still win */ }
     };
@@ -491,11 +510,6 @@ export class ClientNet extends EventTarget {
 
   send(msg) {
     if (this._send) this._send(msg);
-    else if (this.conn && this.conn.open) this.conn.send(msg);
-    else sendJSON(this.ch, msg);
-  }
-}
-sg);
     else if (this.conn && this.conn.open) this.conn.send(msg);
     else sendJSON(this.ch, msg);
   }

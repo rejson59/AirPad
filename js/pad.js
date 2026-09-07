@@ -1,10 +1,12 @@
-import { ClientNet } from './net.js';
+import { ClientNet } from './net.js?v=20260907b';
 
 const app = document.getElementById('app');
 const net = new ClientNet();
 const params = new URLSearchParams(location.search);
 let state = { ax: 0, ay: 0, btn: {} };
 let controls = null;
+// auto-połączenie może wystąpić tylko raz, przy starcie strony (kod z URL + zapisany nick + brak błędu)
+let autoTried = false;
 
 const esc = s => String(s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
 const buzz = ms => { try { navigator.vibrate && navigator.vibrate(ms); } catch (e) {} };
@@ -41,7 +43,10 @@ function screenConnect(err = '') {
     e.target.value = e.target.value.replace(/\D/g, '').slice(0, 4);
     if (e.target.value.length === 4) document.getElementById('name').focus();
   });
-  if (/^\d{4}$/.test(code) && name && !err) setTimeout(() => go.click(), 250);
+  if (!autoTried && /^\d{4}$/.test(code) && name && !err) {
+    autoTried = true;
+    setTimeout(() => go.click(), 250);
+  }
 }
 
 function screenWait(name) {
