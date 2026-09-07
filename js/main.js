@@ -1,5 +1,5 @@
 import { THREE, makeRenderer, basicScene } from './engine.js';
-import { HostNet } from './net.js';
+import { HostNet } from './net.js?v=20260907b';
 import { GAMES, EMOJI, CATS, byId } from './games/index.js';
 import { unlockAudio, countdownTone, stopEngine } from './audio.js';
 
@@ -209,7 +209,7 @@ function play(id) {
   unlockAudio();
   if (idle) idle.visible = false;
   ui.innerHTML = `<div class="hud" id="hud"></div><button class="btn esc" id="escb">⏹ Zakończ</button>
-    <div class="modal" id="cdown"><div class="inner"><div id="cdnum" style="font-size:96px;font-weight:900">3</div>
+    <div class="modal" id="cdown" style="pointer-events:none"><div class="inner"><div id="cdnum" style="font-size:96px;font-weight:900">3</div>
     <div style="color:var(--dim)">${mod.meta.title}</div></div></div>`;
   $('#escb').onclick = () => { if (running) running.dispose(); running = null; stopEngine(); net.broadcast({ t: 'game', game: null }); lobby(); };
   net.broadcast({ t: 'game', game: mod.meta.id, title: mod.meta.title, controls: mod.meta.controls });
@@ -251,6 +251,7 @@ function toast(txt) {
 function showResults(mod, rank) {
   if (running) running.dispose();
   running = null;
+  const cd = document.getElementById('cdown'); if (cd) cd.remove();
   stopEngine();
   net.broadcast({ t: 'over' });
   const m = document.createElement('div');
